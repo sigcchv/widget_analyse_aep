@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <title>Analyse réseau d'eau potable</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body { font-family: system-ui, Arial, sans-serif; padding: 1rem; color: #111; }
+    h2 { margin-bottom: 1rem; }
+    table { border-collapse: collapse; width: 100%; margin-top: 0.5rem; }
+    th, td { border: 1px solid #e1e1e1; padding: 8px; text-align: left; }
+    th { background: #f6f8fa; font-weight: 600; }
+    #info { margin-bottom: 1rem; font-size: 0.95rem; }
+  </style>
+</head>
+<body>
+  <h2>Dernière analyse du réseau d’eau potable</h2>
+  <div id="info">Chargement...</div>
+  <table id="results" style="display:none;">
+    <thead>
+      <tr>
+        <th>Paramètre</th>
+        <th>Résultat</th>
+        <th>Unité</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <script>
+    function getParam(name) {
+      try {
+        const url = new URL(window.location.href);
+        return url.searchParams.get(name);
+      } catch (e) {
+        return null;
+      }
+    }
+
+    async function loadData() {
+      const codeReseau = getParam("code_reseau") || "066000583";
+      const size = 20000;
+      const apiUrl = `https://hubeau.eaufrance.fr/api/v1/qualite_eau_potable/resultats_dis?code_reseau=${encodeURIComponent(codeReseau)}&size=${size}`;
+
+      try {
+        document.getElementById("info").textContent = `Chargement des données pour le réseau ${codeReseau}...`;
+        const res = await fetch(apiUrl);
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        const json = await res.json();
+
+        if (!json || !Array.isArray(json.data) || json.data.length === 0) {
+          document.getElementById("info").textContent = `❌ Aucun résultat trouvé pour le réseau ${codeReseau}.`;
+          return;
+        }
+
+        // Trouver la date la plus récente
+        const timestamps = json.data
+          .map(r => Date.parse(r.date_prelevement))
+          .filter(t => !isNaN(t));
+        const maxTime = Math.max(...timestamps);
+        const latestDate = new Date(maxTime).toISOString().split("T")[0];
+
+        // Filtrer pour cette date
+        const finalResults = json.data.filter(r => {
+          const t = Date.parse(r.date_prelevement);
+          return !isNaN(t) && t === maxTime;
+        });
+
+        if (finalResults.length === 0) {
+          document.getElementById("info").textContent = `❌ Aucun paramètre trouvé pour la date ${latestDate}.`;
+          return;
+        }
+
+        document.getElementById("info").textContent =
+          `Dernière analyse du réseau ${codeReseau} : ${latestDate} (${finalResults.length} paramètres)`;
+
+        // Construire le tableau
+        const tbody = document.querySelector("#results tbody");
+        tbody.innerHTML = "";
+        finalResults
+          .sort((a, b) => (a.libelle_parametre || "").localeCompare(b.libelle_parametre || ""))
+          .forEach(r => {
+            const tr = document.createElement("tr");
+            tr.innerHTML = `
+              <td>${escapeHtml(r.libelle_parametre ?? r.code_parametre ?? "")}</td>
+              <td>${escapeHtml(r.resultat_numerique ?? r.resultat ?? "-")}</td>
+              <td>${escapeHtml(r.unite ?? r.libelle_unite ?? "")}</td>
+            `;
+            tbody.appendChild(tr);
+          });
+
+        document.getElementById("results").style.display = "table";
+
+      } catch (err) {
+        document.getElementById("info").textContent = "Erreur API : " + err.message;
+      }
+    }
+
+    function escapeHtml(s) {
+      if (s === null || s === undefined) return "";
+      return String(s)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+    }
+
+    loadData();
+  </script>
+</body>
+</html>
