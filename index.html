@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <title>Analyses d’eau potable par commune</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body { font-family: system-ui, Arial, sans-serif; padding: 1rem; color: #111; }
+    h2 { margin-bottom: 1rem; }
+    h3 { margin-top: 2rem; margin-bottom: 0.25rem; }
+    table { border-collapse: collapse; width: 100%; margin-top: 0.5rem; margin-bottom: 1rem; }
+    th, td { border: 1px solid #e1e1e1; padding: 6px; text-align: left; font-size: 0.9rem; }
+    th { background: #f6f8fa; font-weight: 600; }
+    #info { margin-bottom: 1rem; font-size: 0.95rem; }
+  </style>
+</head>
+<body>
+  <h2>Analyses de l’eau potable</h2>
+  <div id="info">Chargement...</div>
+  <div id="results"></div>
+
+  <script>
+    function getParam(name) {
+      try {
+        const url = new URL(window.location.href);
+        return url.searchParams.get(name);
+      } catch (e) {
+        return null;
+      }
+    }
+
+    async function loadData() {
+      const codeCommune = getParam("code_commune") || "66206"; // défaut
+      const info = document.getElementById("info");
+      const container = document.getElementById("results");
+      container.innerHTML = "";
+      info.textContent = `Chargement des réseaux pour la commune ${codeCommune}...`;
+
+      try {
+        // Récupérer les réseaux UDI pour la commune
+        const urlUDI = `https://hubeau.eaufrance.fr/api/v1/qualite_eau_potable/communes_udi?code_commune=${encodeURIComponent(codeCommune)}`;
+        const resUDI = await fetch(urlUDI);
+        if (!resUDI.ok) throw new Error("Erreur UDI " + resUDI.status);
+        const jsonUDI = await resUDI.json();
+        if (!jsonUDI || !Array.isArray(jsonUDI.data) || jsonUDI.data.length === 0) {
+          info.textContent = `❌ Aucun réseau trouvé pour la commune ${codeCommune}.`;
+          return;
+        }
+
+        // Dedupliquer les réseaux sur code_reseau (garder premier nom_reseau non vide)
+        const map = new Map();
+        for (const r of jsonUDI.data) {
+          const code = r.code_reseau;
+          if (!code) continue;
+          if (!map.has(code)) {
+            map.set(code, { code_reseau: code, nom_reseau: r.nom_reseau || '' });
+          } else {
+            // si existant sans nom, et celui-ci a un nom, remplace
+            const cur = map.get(code);
+            if ((!cur.nom_reseau || cur.nom_reseau.trim() === '') && r.nom_reseau && r.nom_reseau.trim() !== '') {
+              map.set(code, { code_reseau: code, nom_reseau: r.nom_reseau });
+            }
+          }
+        }
+        const uniqueNetworks = Array.from(map.values());
+        if (uniqueNetworks.length === 0) {
+          info.textContent = `❌ Aucun réseau valide trouvé pour la commune ${codeCommune}.`;
+          return;
+        }
+
+        info.textContent = `✅ ${uniqueNetworks.length} réseau(x) unique(s) trouvé(s) pour la commune ${codeCommune}.`;
+
+        // Pour chaque réseau (séquentiel pour limiter charge), récupérer les résultats et construire un tableau
+        for (const net of uniqueNetworks) {
+          const codeReseau = net.code_reseau;
+          const nomReseau = net.nom_reseau && net.nom_reseau.trim() !== '' ? net.nom_reseau : codeReseau;
+
+          // Récupérer résultats (taille large)
+          const urlResults = `https://hubeau.eaufrance.fr/api/v1/qualite_eau_potable/resultats_dis?code_reseau=${encodeURIComponent(codeReseau)}&size=20000`;
+          const resR = await fetch(urlResults);
+          if (!resR.ok) {
+            // skip if error
+            console.warn(`skip réseau ${codeReseau}: HTTP ${resR.status}`);
+            continue;
+          }
+          const jsonR = await resR.json();
+          if (!jsonR || !Array.isArray(jsonR.data) || jsonR.data.length === 0) {
+            // pas de données pour ce réseau
+            continue;
+          }
+
+          // déterminer la date la plus récente (timestamp)
+          const timestamps = jsonR.data
+            .map(r => {
+              const v = r.date_prelevement;
+              const t = v ? Date.parse(v) : NaN;
+              return isNaN(t) ? null : t;
+            })
+            .filter(t => t !== null);
+          if (timestamps.length === 0) continue;
+          const maxTime = Math.max(...timestamps);
+          const latestDateOnly = new Date(maxTime).toISOString().split('T')[0];
+
+          // filtrer les enregistrements de la dernière date (match exact timestamp, sinon fallback sur date string)
+          let finalResults = jsonR.data.filter(r => {
+            if (!r.date_prelevement) return false;
+            const t = Date.parse(r.date_prelevement);
+            return !isNaN(t) && t === maxTime;
+          });
+          if (finalResults.length === 0) {
+            finalResults = jsonR.data.filter(r => {
+              if (!r.date_prelevement) return false;
+              return r.date_prelevement.startsWith(latestDateOnly);
+            });
+          }
+          if (finalResults.length === 0) continue;
+
+          // Construire section + tableau : en-tête = nom_reseau ; colonnes = Paramètre / Résultat (alphanum) / Unité
+          const section = document.createElement('section');
+          const h = document.createElement('h3');
+          h.textContent = nomReseau;
+          section.appendChild(h);
+          const meta = document.createElement('div');
+          meta.className = 'small';
+          meta.style.marginBottom = '0.35rem';
+          meta.textContent = `Dernière analyse : ${latestDateOnly} (${finalResults.length} paramètres)`;
+          section.appendChild(meta);
+
+          const table = document.createElement('table');
+          table.innerHTML = `
+            <thead>
+              <tr>
+                <th>Paramètre</th>
+                <th>Résultat</th>
+                <th>Unité</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          `;
+          const tbody = table.querySelector('tbody');
+
+          // Trier et remplir
+          finalResults
+            .sort((a, b) => (a.libelle_parametre || '').localeCompare(b.libelle_parametre || ''))
+            .forEach(r => {
+              const tr = document.createElement('tr');
+              // remplacer resultat_numerique par resultat_alphanumerique (fallback sur resultat)
+              const resVal = r.resultat_alphanumerique ?? r.resultat ?? '-';
+              const unite = r.unite ?? r.libelle_unite ?? '';
+              tr.innerHTML = `
+                <td>${escapeHtml(r.libelle_parametre ?? r.code_parametre ?? '')}</td>
+                <td>${escapeHtml(resVal)}</td>
+                <td>${escapeHtml(unite)}</td>
+              `;
+              tbody.appendChild(tr);
+            });
+
+          section.appendChild(table);
+          container.appendChild(section);
+        }
+
+        // si container reste vide
+        if (!container.hasChildNodes()) {
+          info.textContent = `❌ Aucun résultat d’analyse disponible pour les réseaux de la commune ${codeCommune}.`;
+        } else {
+          info.textContent = ``;
+        }
+
+      } catch (err) {
+        console.error(err);
+        document.getElementById('info').textContent = 'Erreur : ' + (err.message || err);
+      }
+    }
+
+    function escapeHtml(s) {
+      if (s === null || s === undefined) return '';
+      return String(s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+    }
+
+    loadData();
+  </script>
+</body>
+</html>
